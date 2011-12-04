@@ -11,6 +11,7 @@ use lib '/home/infobot/lib';
 
 use AnyEvent;
 use AnyEvent::IRC::Client;
+use AnyEvent::XMPP::Client;
 
 ########################################
 # Configuration that should go to an external config file some day
@@ -20,56 +21,84 @@ my $irc_server = 'irc.freenode.net';
 my $irc_port   = 6667;
 my $irc_channel = '#nfntest';
 
+my $xmpp_jid = '';
+my $xmpp_password = '';
+my $xmpp_server = '';
+my $xmpp_port = '';
+
+########################################
+
+
 my $c = AnyEvent->condvar;
 
-my $con = new AnyEvent::IRC::Client;
+# Setup IRC connecttion and stuff
 
-$con->reg_cb(
+my $irc_con = new AnyEvent::IRC::Client;
+
+$irc_con->reg_cb(
     connect => sub {
-        my ( $con, $err ) = @_;
+        my ( $irc_con, $err ) = @_;
 
         if ( defined $err ) {
-            warn "Connect error! => $err\n";
+            warn "IRC connect error! => $err\n";
             $c->broadcast;
         }
         else {
-            warn "Connected! Yay!\n";
+            warn "IRC connected! Yay!\n";
         }
 
         # send IRC registration
-        #$con->send_msg( "NICK", $nick );
-        #$con->send_msg( "USER", $user || $nick, "*", "0", $real || $nick );
+        #$irc_con->send_msg( "NICK", $nick );
+        #$irc_con->send_msg( "USER", $user || $nick, "*", "0", $real || $nick );
     },
 
     disconnect => sub {
-        warn "Oh, got a disconnect: $_[1], exiting...\n";
+        warn "Oh, IRC got a disconnect: $_[1], exiting...\n";
         $c->broadcast;
     },
 
-    registered => sub { warn "I'm registered!\n"; },
+    registered => sub { warn "I'm registered in IRC\n"; },
 
 #    sent => sub {
 #        shift;
-#        warn "DEBUG SENT: " . join( '|', @_ ) . "\n";
+#        warn "DEBUG IRC SENT: " . join( '|', @_ ) . "\n";
 #    },
 
 #    'irc_*' => sub {
 #        my @p = @{ delete $_[1]->{params} || [] };
-#        warn "DEBUG: " . join( '|', %{ $_[1] }, @p ) . "\n";
+#        warn "DEBUG IRC: " . join( '|', %{ $_[1] }, @p ) . "\n";
 #    },
 
 );
 
-$con->connect( $irc_server, $irc_port, { nick => $irc_nick } );
+$irc_con->connect( $irc_server, $irc_port, { nick => $irc_nick } );
 
-$con->send_srv(
+$irc_con->send_srv(
     PRIVMSG => 'nfn',
     "Hello there I'm the SubEtha proxy and I've just connected to IRC!"
 );
 
-$con->send_srv('JOIN', $irc_channel);
-$con->send_chan($irc_channel, 'PRIVMSG', $irc_channel, 'Hi, my name is SubEtha and I\'ll be your friendly lobster proxy');
+$irc_con->send_srv('JOIN', $irc_channel);
+$irc_con->send_chan($irc_channel, 'PRIVMSG', $irc_channel, 'Hi, my name is SubEtha and I\'ll be your friendly lobster proxy');
+
+# Setup XMPP connecttion and stuff
+
+my $xmpp_con = new AnyEvent::XMPP::Client;
+
+$xmpp_con->reg_cb(
+    connected => sub {
+        warn "XMPP connected with Jid $_[0]\n";
+    },
+    connect_error => sub {
+        warn "XMPP connection error for Jid $_[0]: $_[1]\n";
+        $c->broadcast;
+    },
+);
+
+add_account ($xmpp_jid, $xmpp_password);
+
+$xmpp_con->start();
 
 $c->wait;
-$con->disconnect;
+$irc_con->disconnect;
 
