@@ -1,0 +1,75 @@
+#!/usr/bin/env perl
+
+use warnings;
+use strict;
+
+use File::Spec;
+use File::Basename 'dirname';
+
+use lib join '/', File::Spec->splitdir( dirname(__FILE__) ), '..', 'lib';
+use lib '/home/infobot/lib';
+
+use AnyEvent;
+use AnyEvent::IRC::Client;
+
+########################################
+# Configuration that should go to an external config file some day
+
+my $irc_nick   = 'subetha';
+my $irc_server = 'irc.freenode.net';
+my $irc_port   = 6667;
+my $irc_channel = '#nfntest';
+
+my $c = AnyEvent->condvar;
+
+my $con = new AnyEvent::IRC::Client;
+
+$con->reg_cb(
+    connect => sub {
+        my ( $con, $err ) = @_;
+
+        if ( defined $err ) {
+            warn "Connect error! => $err\n";
+            $c->broadcast;
+        }
+        else {
+            warn "Connected! Yay!\n";
+        }
+
+        # send IRC registration
+        #$con->send_msg( "NICK", $nick );
+        #$con->send_msg( "USER", $user || $nick, "*", "0", $real || $nick );
+    },
+
+    disconnect => sub {
+        warn "Oh, got a disconnect: $_[1], exiting...\n";
+        $c->broadcast;
+    },
+
+    registered => sub { warn "I'm registered!\n"; },
+
+#    sent => sub {
+#        shift;
+#        warn "DEBUG SENT: " . join( '|', @_ ) . "\n";
+#    },
+
+#    'irc_*' => sub {
+#        my @p = @{ delete $_[1]->{params} || [] };
+#        warn "DEBUG: " . join( '|', %{ $_[1] }, @p ) . "\n";
+#    },
+
+);
+
+$con->connect( $irc_server, $irc_port, { nick => $irc_nick } );
+
+$con->send_srv(
+    PRIVMSG => 'nfn',
+    "Hello there I'm the SubEtha proxy and I've just connected to IRC!"
+);
+
+$con->send_srv('JOIN', $irc_channel);
+$con->send_chan($irc_channel, 'PRIVMSG', $irc_channel, 'Hi, my name is SubEtha and I\'ll be your friendly lobster proxy');
+
+$c->wait;
+$con->disconnect;
+
