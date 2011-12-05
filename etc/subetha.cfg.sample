@@ -1,0 +1,8 @@
+{
+"irc_nick":"changeme",
+"irc_server":"irc.freenode.net",
+"irc_port":6667,
+"irc_channel":"#testchangeme",
+"xmpp_jid":"jid@change.me",
+"xmpp_password":"secretchangeme",
+}

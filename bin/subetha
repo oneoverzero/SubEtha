@@ -9,25 +9,54 @@ use File::Basename 'dirname';
 use lib join '/', File::Spec->splitdir( dirname(__FILE__) ), '..', 'lib';
 use lib '/home/infobot/lib';
 
-use AnyEvent;
-use AnyEvent::IRC::Client;
-use AnyEvent::XMPP::Client;
+#use AnyEvent;
+#use AnyEvent::IRC::Client;
+#use AnyEvent::XMPP::Client;
+use JSON;
+
+use Data::Dumper;
 
 ########################################
-# Configuration that should go to an external config file some day
+# Configuration
 
-my $irc_nick   = 'subetha';
-my $irc_server = 'irc.freenode.net';
-my $irc_port   = 6667;
-my $irc_channel = '#nfntest';
+my $DEBUG = $ENV{DEBUG} || 1;
+my $config_file = '../etc/subetha.cfg';
 
-my $xmpp_jid = '';
-my $xmpp_password = '';
-my $xmpp_server = '';
-my $xmpp_port = '';
+# Stuff bellow this line should really be configured in the config file
+# specified above in $config_file
+
+my %config = (
+    irc_server  => 'irc.freenode.net',
+    irc_port    => 6667,
+    irc_channel => '#testchannel',
+
+    xmpp_jid      => 'mybot@jabber.org',
+    xmpp_password => 'verys3cret',
+);
+
+my $cfg = read_json_conf($config_file);
+if ($cfg) {
+    %config = %$cfg;
+}
+
+if ($DEBUG) {
+    warn "Starting up with the following config:\n";
+    warn Dumper( \%config );
+}
+
+sub read_json_conf {
+    my $filename = shift;
+    my $fh;
+    if ( !open( $fh, '<', $filename ) ) {
+        warn "Error opening the config file \"$filename\": $!\n";
+        return;
+    }
+    my $json_conf = do { local $/; <$fh> };
+    my $conf = decode_json($json_conf);
+    return $conf;
+}
 
 ########################################
-
 
 my $c = AnyEvent->condvar;
 
@@ -44,7 +73,7 @@ $irc_con->reg_cb(
             $c->broadcast;
         }
         else {
-            warn "IRC connected! Yay!\n";
+            warn "IRC connected! Yay!\n" if $DEBUG;
         }
 
         # send IRC registration
@@ -57,29 +86,31 @@ $irc_con->reg_cb(
         $c->broadcast;
     },
 
-    registered => sub { warn "I'm registered in IRC\n"; },
+    registered => sub { warn "I'm registered in IRC\n" if $DEBUG; },
 
-#    sent => sub {
-#        shift;
-#        warn "DEBUG IRC SENT: " . join( '|', @_ ) . "\n";
-#    },
+    #    sent => sub {
+    #        shift;
+    #        warn "DEBUG IRC SENT: " . join( '|', @_ ) . "\n" if $DEBUG;
+    #    },
 
-#    'irc_*' => sub {
-#        my @p = @{ delete $_[1]->{params} || [] };
-#        warn "DEBUG IRC: " . join( '|', %{ $_[1] }, @p ) . "\n";
-#    },
+    #    'irc_*' => sub {
+    #        my @p = @{ delete $_[1]->{params} || [] };
+    #        warn "DEBUG IRC: " . join( '|', %{ $_[1] }, @p ) . "\n" if $DEBUG;
+    #    },
 
 );
 
-$irc_con->connect( $irc_server, $irc_port, { nick => $irc_nick } );
+$irc_con->connect( $config{irc_server}, $config{irc_port},
+    { nick => $config{irc_nick} } );
 
 $irc_con->send_srv(
     PRIVMSG => 'nfn',
     "Hello there I'm the SubEtha proxy and I've just connected to IRC!"
 );
 
-$irc_con->send_srv('JOIN', $irc_channel);
-$irc_con->send_chan($irc_channel, 'PRIVMSG', $irc_channel, 'Hi, my name is SubEtha and I\'ll be your friendly lobster proxy');
+$irc_con->send_srv( 'JOIN', $config{irc_channel} );
+$irc_con->send_chan( $config{irc_channel}, 'PRIVMSG', $config{irc_channel},
+    'Hi, my name is SubEtha and I\'ll be your friendly lobster proxy' );
 
 # Setup XMPP connecttion and stuff
 
@@ -87,7 +118,7 @@ my $xmpp_con = new AnyEvent::XMPP::Client;
 
 $xmpp_con->reg_cb(
     connected => sub {
-        warn "XMPP connected with Jid $_[0]\n";
+        warn "XMPP connected with Jid $_[0]\n" if $DEBUG;
     },
     connect_error => sub {
         warn "XMPP connection error for Jid $_[0]: $_[1]\n";
@@ -95,7 +126,7 @@ $xmpp_con->reg_cb(
     },
 );
 
-add_account ($xmpp_jid, $xmpp_password);
+add_account( $config{xmpp_jid}, $config{xmpp_password} );
 
 $xmpp_con->start();
 
