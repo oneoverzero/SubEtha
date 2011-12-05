@@ -5,4 +5,5 @@
 "irc_channel":"#testchangeme",
 "xmpp_jid":"jid@change.me",
 "xmpp_password":"secretchangeme",
+"xmpp_chatroom":"chat@ippartych.at"
 }

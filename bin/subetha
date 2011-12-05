@@ -23,6 +23,9 @@ use Data::Dumper;
 my $DEBUG = $ENV{DEBUG} || 1;
 my $config_file = '../etc/subetha.cfg';
 
+my $connect_msg =
+  "Hi, my name is SubEtha and I'll be your friendly lobster proxy";
+
 # Stuff bellow this line should really be configured in the config file
 # specified above in $config_file
 
@@ -33,6 +36,7 @@ my %config = (
 
     xmpp_jid      => 'mybot@jabber.org',
     xmpp_password => 'verys3cret',
+    xmpp_chatroom => 'chat@im.partych.at',
 );
 
 my $cfg = read_json_conf($config_file);
@@ -71,90 +75,96 @@ $irc_con->reg_cb(
         my ( $irc_con, $err ) = @_;
 
         if ( defined $err ) {
-            warn "IRC connect error! => $err\n";
-            $c->broadcast;
+            warn "IRC: connect error! => $err\n";
+            $c->broadcast("IRC connection borked");
         }
         else {
-            warn "IRC connected! Yay!\n" if $DEBUG;
+            warn "IRC: connected! Yay!\n" if $DEBUG;
         }
-
-        # send IRC registration
-        #$irc_con->send_msg( "NICK", $nick );
-        #$irc_con->send_msg( "USER", $user || $nick, "*", "0", $real || $nick );
     },
 
     disconnect => sub {
         my ( $irc_con, $reason ) = @_;
+
         $reason = "no reason given" unless $reason;
-        warn "Oh, IRC got a disconnect: $reason\n";
-        $c->broadcast;
+        warn "IRC: disconnected: $reason\n";
+        $c->broadcast("IRC got disconnected");
     },
 
     publicmsg => sub {
         my ( $irc_con, $channel, $ircmsg ) = @_;
-        my $who = prefix_nick($ircmsg->{prefix});
+
+        my $who  = prefix_nick( $ircmsg->{prefix} );
         my $text = $ircmsg->{params}->[1];
-        warn "Heard on IRC: \"$channel: $who: $text\"\n" if $DEBUG;
-        grapevine($channel, $who, $text);
+        warn "IRC: \"$channel: $who: $text\"\n" if $DEBUG;
+        grapevine( $channel, $who, $text );
     },
 
     privatemsg => sub {
         my ( $irc_con, $nick, $ircmsg ) = @_;
+
         #warn Dumper $ircmsg;
-        my $who = prefix_nick($ircmsg->{prefix});
+        my $who  = prefix_nick( $ircmsg->{prefix} );
         my $text = $ircmsg->{params}->[1];
-        warn "Told me on IRC: $who->$nick: $text\n" if $DEBUG;
+        warn "IRC: \"$who\" told me \"$text\" in private (to \"$nick\")\n"
+          if $DEBUG;
+        personal( $who, $text );
     },
 
-    registered => sub { warn "I'm registered in IRC\n" if $DEBUG; },
-
-    #    sent => sub {
-    #        shift;
-    #        warn "DEBUG IRC SENT: " . join( '|', @_ ) . "\n" if $DEBUG;
-    #    },
-
-    #    'irc_*' => sub {
-    #        my @p = @{ delete $_[1]->{params} || [] };
-    #        warn "DEBUG IRC: " . join( '|', %{ $_[1] }, @p ) . "\n" if $DEBUG;
-    #    },
-
+    registered => sub { warn "IRC: registered\n" if $DEBUG; },
 );
 
 $irc_con->connect( $config{irc_server}, $config{irc_port},
     { nick => $config{irc_nick} } );
-
-$irc_con->send_srv(
-    PRIVMSG => 'nfn',
-    "Hello there I'm the SubEtha proxy and I've just connected to IRC!"
-);
-
 $irc_con->send_srv( 'JOIN', $config{irc_channel} );
 $irc_con->send_chan( $config{irc_channel}, 'PRIVMSG', $config{irc_channel},
-    'Hi, my name is SubEtha and I\'ll be your friendly lobster proxy' );
+    $connect_msg );
 
+########################################
 # Setup XMPP connecttion and stuff
 
-my $xmpp_con = new AnyEvent::XMPP::Client;
+my $xmpp_con = new AnyEvent::XMPP::Client();    # debug => $DEBUG );
 
 $xmpp_con->reg_cb(
     connected => sub {
-        if ($DEBUG) {
-            warn "XMPP connected with Jid\n";
-            warn Dumper $_[0];
-        }
+        my ( $connection, $account ) = @_;
+
+        warn "XMPP: connected with account " . $account->jid . "\n" if $DEBUG;
+        $connection->send_message( $connect_msg, $config{xmpp_chatroom} );
     },
+
     connect_error => sub {
-        warn "XMPP connection error\n";
-        warn "JID:\n",   Dumper $_[0];
-        warn "Error:\n", Dumper $_[1];
-        $c->broadcast;
+        my ( $connection, $account, $reason ) = @_;
+
+        warn "XMPP: connection error! JID: "
+          . $account->jid
+          . ", reason: \"$reason\"\n";
+        $c->broadcast("XMPP connection borked");
     },
+
+    added_account => sub {
+        my ( $connection, $account ) = @_;
+
+        warn "XMPP: Account added: " . $account->jid . "\n" if $DEBUG;
+    },
+
+    error => sub {
+        my ( $connection, $account, $error ) = @_;
+
+        warn "XMPP: Error with account "
+          . $account->jid . ": \""
+          . $error->string . "\"\n";
+
+        # TODO: Probably should try disconnecting and reconnecting here...
+    }
 );
 
 $xmpp_con->add_account( $config{xmpp_jid}, $config{xmpp_password} );
-
 $xmpp_con->start();
 
+#$xmpp_con->set_presence('available', '', '');
+
+########################################
 # Report stuff and go into the event loop
 
 AnyEvent::post_detect {
@@ -165,8 +175,22 @@ $c->wait;
 $irc_con->disconnect;
 warn "I'm done, goodbye.\n";
 
+########################################
+# The good stuff!
+
 sub grapevine {
-    my ($channel, $who, $msg) = @_;
+    my ( $channel, $who, $msg ) = @_;
 
     warn "Grapevine: heard \"$msg\" from \"$who\" on \"$channel\"\n" if $DEBUG;
+}
+
+sub personal {
+    my ( $who, $msg ) = @_;
+
+    warn "Personal message: \"$msg\" from \"$who\"\n" if $DEBUG;
+    if ( $who eq 'nfn' ) { #TODO: Eeeeeeeek!
+        if ($msg eq 'shutdown') {
+            $c->broadcast("Nuno told me to go!");
+        }
+    }
 }
