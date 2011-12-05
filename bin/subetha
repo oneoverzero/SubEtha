@@ -9,9 +9,10 @@ use File::Basename 'dirname';
 use lib join '/', File::Spec->splitdir( dirname(__FILE__) ), '..', 'lib';
 use lib '/home/infobot/lib';
 
-#use AnyEvent;
-#use AnyEvent::IRC::Client;
-#use AnyEvent::XMPP::Client;
+use AnyEvent;
+use AnyEvent::IRC::Client;
+use AnyEvent::XMPP::Client;
+use AnyEvent::IRC::Util qw/prefix_nick/;
 use JSON;
 
 use Data::Dumper;
@@ -56,6 +57,7 @@ sub read_json_conf {
     return $conf;
 }
 
+#
 ########################################
 
 my $c = AnyEvent->condvar;
@@ -82,8 +84,26 @@ $irc_con->reg_cb(
     },
 
     disconnect => sub {
-        warn "Oh, IRC got a disconnect: $_[1], exiting...\n";
+        my ( $irc_con, $reason ) = @_;
+        $reason = "no reason given" unless $reason;
+        warn "Oh, IRC got a disconnect: $reason\n";
         $c->broadcast;
+    },
+
+    publicmsg => sub {
+        my ( $irc_con, $channel, $ircmsg ) = @_;
+        my $who = prefix_nick($ircmsg->{prefix});
+        my $text = $ircmsg->{params}->[1];
+        warn "Heard on IRC: \"$channel: $who: $text\"\n" if $DEBUG;
+        grapevine($channel, $who, $text);
+    },
+
+    privatemsg => sub {
+        my ( $irc_con, $nick, $ircmsg ) = @_;
+        #warn Dumper $ircmsg;
+        my $who = prefix_nick($ircmsg->{prefix});
+        my $text = $ircmsg->{params}->[1];
+        warn "Told me on IRC: $who->$nick: $text\n" if $DEBUG;
     },
 
     registered => sub { warn "I'm registered in IRC\n" if $DEBUG; },
@@ -118,18 +138,35 @@ my $xmpp_con = new AnyEvent::XMPP::Client;
 
 $xmpp_con->reg_cb(
     connected => sub {
-        warn "XMPP connected with Jid $_[0]\n" if $DEBUG;
+        if ($DEBUG) {
+            warn "XMPP connected with Jid\n";
+            warn Dumper $_[0];
+        }
     },
     connect_error => sub {
-        warn "XMPP connection error for Jid $_[0]: $_[1]\n";
+        warn "XMPP connection error\n";
+        warn "JID:\n",   Dumper $_[0];
+        warn "Error:\n", Dumper $_[1];
         $c->broadcast;
     },
 );
 
-add_account( $config{xmpp_jid}, $config{xmpp_password} );
+$xmpp_con->add_account( $config{xmpp_jid}, $config{xmpp_password} );
 
 $xmpp_con->start();
 
+# Report stuff and go into the event loop
+
+AnyEvent::post_detect {
+    warn "My event model is \"$AnyEvent::MODEL\"\n" if $DEBUG;
+};
+
 $c->wait;
 $irc_con->disconnect;
+warn "I'm done, goodbye.\n";
 
+sub grapevine {
+    my ($channel, $who, $msg) = @_;
+
+    warn "Grapevine: heard \"$msg\" from \"$who\" on \"$channel\"\n" if $DEBUG;
+}
