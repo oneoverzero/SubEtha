@@ -65,7 +65,9 @@ sub read_json_conf {
 ########################################
 
 my $c = AnyEvent->condvar;
+my @channels = ( 'irc', 'xmpp' );
 
+########################################
 # Setup IRC connecttion and stuff
 
 my $irc_con = new AnyEvent::IRC::Client;
@@ -75,11 +77,11 @@ $irc_con->reg_cb(
         my ( $irc_con, $err ) = @_;
 
         if ( defined $err ) {
-            warn "IRC: connect error! => $err\n";
+            warn "IRC: connect error: $err\n";
             $c->broadcast("IRC connection borked");
         }
         else {
-            warn "IRC: connected! Yay!\n" if $DEBUG;
+            warn "IRC: connected.\n" if $DEBUG;
         }
     },
 
@@ -96,8 +98,8 @@ $irc_con->reg_cb(
 
         my $who  = prefix_nick( $ircmsg->{prefix} );
         my $text = $ircmsg->{params}->[1];
-        warn "IRC: \"$channel: $who: $text\"\n" if $DEBUG;
-        grapevine( $channel, $who, $text );
+        warn "IRC: \"$channel: $who: $text\"\n" if $DEBUG > 1;
+        grapevine( 'irc', $who, $text );
     },
 
     privatemsg => sub {
@@ -107,7 +109,7 @@ $irc_con->reg_cb(
         my $who  = prefix_nick( $ircmsg->{prefix} );
         my $text = $ircmsg->{params}->[1];
         warn "IRC: \"$who\" told me \"$text\" in private (to \"$nick\")\n"
-          if $DEBUG;
+          if $DEBUG > 1;
         personal( $who, $text );
     },
 
@@ -123,14 +125,36 @@ $irc_con->send_chan( $config{irc_channel}, 'PRIVMSG', $config{irc_channel},
 ########################################
 # Setup XMPP connecttion and stuff
 
-my $xmpp_con = new AnyEvent::XMPP::Client();    # debug => $DEBUG );
+my $xmpp_debug = 0;
+if ( $DEBUG > 2 ) { $xmpp_debug = 1 }
+my $xmpp_con = new AnyEvent::XMPP::Client( debug => $xmpp_debug );
 
 $xmpp_con->reg_cb(
     connected => sub {
         my ( $connection, $account ) = @_;
 
         warn "XMPP: connected with account " . $account->jid . "\n" if $DEBUG;
+    },
+
+    session_ready => sub {
+        my ($connection) = @_;
+
+        warn "XMPP: Session is ready, let's rock n' roll\n" if $DEBUG;
         $connection->send_message( $connect_msg, $config{xmpp_chatroom} );
+    },
+
+    added_account => sub {
+        my ( $connection, $account ) = @_;
+
+        warn "XMPP: Account added: " . $account->jid . "\n" if $DEBUG;
+    },
+
+    message => sub {
+        my ( $connection, $account, $msg ) = @_;
+
+        my $text = $msg->body;
+        warn "XMPP: \"$text\"\n" if $DEBUG > 1;
+        grapevine( 'xmpp', '', $text );
     },
 
     connect_error => sub {
@@ -140,12 +164,6 @@ $xmpp_con->reg_cb(
           . $account->jid
           . ", reason: \"$reason\"\n";
         $c->broadcast("XMPP connection borked");
-    },
-
-    added_account => sub {
-        my ( $connection, $account ) = @_;
-
-        warn "XMPP: Account added: " . $account->jid . "\n" if $DEBUG;
     },
 
     error => sub {
@@ -182,14 +200,37 @@ sub grapevine {
     my ( $channel, $who, $msg ) = @_;
 
     warn "Grapevine: heard \"$msg\" from \"$who\" on \"$channel\"\n" if $DEBUG;
+
+    for my $chan ( @channels ) {
+        next if $channel eq $chan;
+
+        if ( $chan eq 'irc' ) {
+            my ( $who, $msg_1 ) = $msg =~ /\[(.+)\]\s+(.+)$/;
+            if ( $who && $msg_1 ) {
+                $msg = "<$who> $msg_1";
+            }
+            $irc_con->send_chan( $config{irc_channel}, 'PRIVMSG',
+                $config{irc_channel}, $msg );
+        }
+        elsif ( $chan eq 'xmpp' ) {
+            if ($who) {
+                $msg = "[$who] $msg";
+            }
+            $xmpp_con->send_message( $msg, $config{xmpp_chatroom} );
+        }
+        else {
+            warn
+"Message received from unknown channel! channel:\"$channel\"; who:\"$who\";msg:\"$msg\"\n";
+        }
+    }
 }
 
 sub personal {
     my ( $who, $msg ) = @_;
 
     warn "Personal message: \"$msg\" from \"$who\"\n" if $DEBUG;
-    if ( $who eq 'nfn' ) { #TODO: Eeeeeeeek!
-        if ($msg eq 'shutdown') {
+    if ( $who eq 'nfn' ) {    #TODO: Eeeeeeeek!
+        if ( $msg eq 'shutdown' ) {
             $c->broadcast("Nuno told me to go!");
         }
     }
