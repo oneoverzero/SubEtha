@@ -184,7 +184,13 @@ $xmpp_con->reg_cb(
     }
 );
 
-$xmpp_con->add_account( $config{xmpp_jid}, $config{xmpp_password} );
+if ( $config{xmpp_server} ) {
+    $xmpp_con->add_account( $config{xmpp_jid}, $config{xmpp_password},
+        $config{xmpp_server} );
+}
+else {
+    $xmpp_con->add_account( $config{xmpp_jid}, $config{xmpp_password} );
+}
 $xmpp_con->start();
 
 #$xmpp_con->set_presence('available', '', '');
@@ -245,7 +251,8 @@ sub parse_xmpp {
     my ( $who, $message ) = $incoming_text =~ /\[(.+?)\]\s+(.+)$/;
 
     if (
-        ( $who eq 'subetha' )   # TODO: Eeeek, only a troll hammers in the nick!
+        $who
+        && ( $who eq 'subetha' ) # TODO: Eeeek!
         && ( $message =~ /\[woot! now at (\d+)\]/ )
       )
     {
