@@ -244,6 +244,13 @@ sub parse_xmpp {
 
     my ( $who, $message ) = $incoming_text =~ /\[(.+?)\]\s+(.+)$/;
 
+    if (
+        ( $who eq 'subetha' )   # TODO: Eeeek, only a troll hammers in the nick!
+        && ( $message =~ /\[woot! now at (\d+)\]/ )
+      )
+    {
+        $message = "\"Over there\" the karma was raised to $1";
+    }
 
     return ( $who, $message );
 }
