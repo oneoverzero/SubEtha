@@ -14,6 +14,7 @@ use AnyEvent::IRC::Client;
 use AnyEvent::XMPP::Client;
 use AnyEvent::IRC::Util qw/prefix_nick/;
 use JSON;
+use String::SetUTF8;
 
 use Data::Dumper;
 
@@ -216,6 +217,7 @@ sub grapevine {
             if ($who) {
                 $msg = "[$who] $msg";
             }
+            setUTF8($msg);
             $xmpp_con->send_message( $msg, $config{xmpp_chatroom} );
         }
         else {
