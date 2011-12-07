@@ -34,8 +34,10 @@ my $connect_msg =
 # specified above in $config_file
 
 my %config = (
-    irc_server => 'irc.freenode.net',
-    irc_port   => 6667,
+    irc_server   => 'irc.freenode.net',
+    irc_port     => 6667,
+    irc_nick     => 'ultrabot',
+    irc_password => 'verys3crit',
 
     xmpp_jid      => 'mybot@jabber.org',
     xmpp_password => 'verys3cret',
@@ -49,7 +51,8 @@ if ($cfg) {
 }
 
 if ($DEBUG) {
-    warn "Starting up with DEBUG=$DEBUG, version $VERSION, and the following config:\n";
+    warn
+"Starting up with DEBUG=$DEBUG, version $VERSION, and the following config:\n";
     warn Dumper( \%config );
 }
 
@@ -119,7 +122,7 @@ $irc_con->reg_cb(
         personal( $who, $text );
     },
 
-    registered => sub { warn "IRC: registered\n" if $DEBUG; },
+    registered => sub { warn "IRC: registered on network\n" if $DEBUG; },
 
     join => sub {
         my ( $irc_con, $nick, $channel, $is_myself ) = @_;
@@ -238,12 +241,12 @@ sub grapevine {
         next if $channel eq $chan;
 
         if ( $config{channels}{$chan} eq 'irc' ) {
-            warn "Resending on $chan\n" if $DEBUG>1;
+            warn "Resending on $chan\n" if $DEBUG > 1;
             $irc_con->send_chan( $chan, 'PRIVMSG', $chan,
                 format_irc( $who, $msg ) );
         }
         elsif ( $config{channels}{$chan} eq 'xmpp' ) {
-            warn "Resending on $chan\n" if $DEBUG>1;
+            warn "Resending on $chan\n" if $DEBUG > 1;
             $xmpp_con->send_message( format_xmpp( $who, $msg ), $chan );
         }
         else {
@@ -262,6 +265,19 @@ sub personal {
             $c->broadcast("Nuno told me to go!");
         }
     }
+
+    if (
+        ( $who eq 'NickServ' )
+        && ( $msg =~
+/^This nickname is registered. Please choose a different nickname, or identify via/
+        )
+        && exists( $config{irc_password} )
+      )
+    {
+        my $identify_command = "identify ".$config{irc_password};
+        warn "IRC: Identifying myself to NickServ\n" if $DEBUG;
+        $irc_con->send_srv( PRIVMSG => 'NickServ', $identify_command );
+    }
 }
 
 sub parse_xmpp {
@@ -269,22 +285,21 @@ sub parse_xmpp {
 
     my ( $trash, $who, $message ) = $incoming_text =~ /(\[(.+?)\]\s+)?(.+)$/;
 
-    if (
-        $who
-        && ( $who eq 'subetha' )    # TODO: Eeeek!
-        && ( $message =~ /\[(woot|ouch)! now at (-?\d+)\]/ )
-      )
+    if (   $who
+        && ( $who eq $config{irc_nick} )
+        && ( $message =~ /\[(woot|ouch)! now at (-?\d+)\]/ ) )
     {
+
         # This is an echo of a ++/-- that was done elsewhere
         $message = "\"Over there\" the karma was changed to $2";
     }
-    elsif( $message =~ /(.*)?\[(woot|ouch)! now at (-?\d+)\](.*)?/ ) {
+    elsif ( $message =~ /(.*)?\[(woot|ouch)! now at (-?\d+)\](.*)?/ ) {
+
         # This is a ++/-- done on this channel
         $message = "$1 $4";
     }
 
-
-    if (!$who) {
+    if ( !$who ) {
         $who = '...';
     }
 
