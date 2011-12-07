@@ -11,12 +11,15 @@ use lib '/home/infobot/lib';
 
 use AnyEvent;
 use AnyEvent::IRC::Client;
-use AnyEvent::XMPP::Client;
 use AnyEvent::IRC::Util qw/prefix_nick/;
+use AnyEvent::XMPP::Client;
+use AnyEvent::XMPP::Util qw/prep_bare_jid/;
 use JSON;
 use String::SetUTF8;
 
 use Data::Dumper;
+
+my $VERSION = 0.2;
 
 ########################################
 # Configuration
@@ -31,13 +34,13 @@ my $connect_msg =
 # specified above in $config_file
 
 my %config = (
-    irc_server  => 'irc.freenode.net',
-    irc_port    => 6667,
-    irc_channel => '#testchannel',
+    irc_server => 'irc.freenode.net',
+    irc_port   => 6667,
 
     xmpp_jid      => 'mybot@jabber.org',
     xmpp_password => 'verys3cret',
-    xmpp_chatroom => 'chat@im.partych.at',
+
+    channels => { 'chat@im.partych.at' => 'xmpp', '#testchan' => 'irc' },
 );
 
 my $cfg = read_json_conf($config_file);
@@ -46,7 +49,7 @@ if ($cfg) {
 }
 
 if ($DEBUG) {
-    warn "Starting up with the following config:\n";
+    warn "Starting up with DEBUG=$DEBUG, version $VERSION, and the following config:\n";
     warn Dumper( \%config );
 }
 
@@ -66,7 +69,6 @@ sub read_json_conf {
 ########################################
 
 my $c = AnyEvent->condvar;
-my @channels = ( 'irc', 'xmpp' );
 
 ########################################
 # Setup IRC connecttion and stuff
@@ -99,10 +101,10 @@ $irc_con->reg_cb(
 
         my $who  = prefix_nick( $ircmsg->{prefix} );
         my $text = $ircmsg->{params}->[1];
-        warn "IRC: \"$channel: $who: $text\"\n" if $DEBUG > 1;
+        warn "IRC: Got \"$channel: $who: $text\"\n" if $DEBUG > 1;
         $text = parse_irc($text);
         if ($text) {
-            grapevine( 'irc', $who, $text );
+            grapevine( $channel, $who, $text );
         }
     },
 
@@ -118,13 +120,25 @@ $irc_con->reg_cb(
     },
 
     registered => sub { warn "IRC: registered\n" if $DEBUG; },
+
+    join => sub {
+        my ( $irc_con, $nick, $channel, $is_myself ) = @_;
+
+        if ($is_myself) {
+            warn "IRC: Just joined $channel\n" if $DEBUG;
+            $irc_con->send_chan( $channel, 'PRIVMSG', $channel, $connect_msg );
+        }
+    }
 );
 
 $irc_con->connect( $config{irc_server}, $config{irc_port},
     { nick => $config{irc_nick} } );
-$irc_con->send_srv( 'JOIN', $config{irc_channel} );
-$irc_con->send_chan( $config{irc_channel}, 'PRIVMSG', $config{irc_channel},
-    $connect_msg );
+
+for my $channel ( keys %{ $config{channels} } ) {
+    next unless ( $config{channels}{$channel} eq 'irc' );
+    warn "IRC: Trying to connect to channel $channel\n" if $DEBUG;
+    $irc_con->send_srv( 'JOIN', $channel );
+}
 
 ########################################
 # Setup XMPP connecttion and stuff
@@ -137,14 +151,19 @@ $xmpp_con->reg_cb(
     connected => sub {
         my ( $connection, $account ) = @_;
 
-        warn "XMPP: connected with account " . $account->jid . "\n" if $DEBUG;
+        warn "XMPP: connected with account " . $account->jid . "\n"
+          if $DEBUG;
     },
 
     session_ready => sub {
         my ($connection) = @_;
 
         warn "XMPP: Session is ready, let's rock n' roll\n" if $DEBUG;
-        $connection->send_message( $connect_msg, $config{xmpp_chatroom} );
+        for my $channel ( keys %{ $config{channels} } ) {
+            next unless ( $config{channels}{$channel} eq 'xmpp' );
+            warn "XMPP: Greeting people on $channel\n" if $DEBUG;
+            $connection->send_message( $connect_msg, $channel );
+        }
     },
 
     added_account => sub {
@@ -156,11 +175,13 @@ $xmpp_con->reg_cb(
     message => sub {
         my ( $connection, $account, $msg ) = @_;
 
-        my $text = $msg->body;
-        warn "XMPP: \"$text\"\n" if $DEBUG > 1;
+        my $text    = $msg->body;
+        my $channel = $msg->from;
+        $channel = prep_bare_jid($channel);
+        warn "XMPP: Got \"$text\" on \"$channel\"\n" if $DEBUG > 1;
         my ( $who, $message ) = parse_xmpp($text);
         if ($message) {
-            grapevine( 'xmpp', $who, $message );
+            grapevine( $channel, $who, $message );
         }
     },
 
@@ -193,8 +214,6 @@ else {
 }
 $xmpp_con->start();
 
-#$xmpp_con->set_presence('available', '', '');
-
 ########################################
 # Report stuff and go into the event loop
 
@@ -212,20 +231,20 @@ warn "I'm done, goodbye.\n";
 sub grapevine {
     my ( $channel, $who, $msg ) = @_;
 
-    warn "Grapevine: heard \"$msg\" from \"$who\" on \"$channel\"\n" if $DEBUG;
+    warn "Grapevine: heard \"$msg\" from \"$who\" on \"$channel\"\n"
+      if $DEBUG;
 
-    for my $chan (@channels) {
+    for my $chan ( keys %{ $config{channels} } ) {
         next if $channel eq $chan;
 
-        if ( $chan eq 'irc' ) {
-            $irc_con->send_chan(
-                $config{irc_channel}, 'PRIVMSG',
-                $config{irc_channel}, format_irc( $who, $msg )
-            );
+        if ( $config{channels}{$chan} eq 'irc' ) {
+            warn "Resending on $chan\n" if $DEBUG>1;
+            $irc_con->send_chan( $chan, 'PRIVMSG', $chan,
+                format_irc( $who, $msg ) );
         }
-        elsif ( $chan eq 'xmpp' ) {
-            $xmpp_con->send_message( format_xmpp( $who, $msg ),
-                $config{xmpp_chatroom} );
+        elsif ( $config{channels}{$chan} eq 'xmpp' ) {
+            warn "Resending on $chan\n" if $DEBUG>1;
+            $xmpp_con->send_message( format_xmpp( $who, $msg ), $chan );
         }
         else {
             warn
@@ -248,15 +267,25 @@ sub personal {
 sub parse_xmpp {
     my ($incoming_text) = @_;
 
-    my ( $who, $message ) = $incoming_text =~ /\[(.+?)\]\s+(.+)$/;
+    my ( $trash, $who, $message ) = $incoming_text =~ /(\[(.+?)\]\s+)?(.+)$/;
 
     if (
         $who
-        && ( $who eq 'subetha' ) # TODO: Eeeek!
-        && ( $message =~ /\[woot! now at (\d+)\]/ )
+        && ( $who eq 'subetha' )    # TODO: Eeeek!
+        && ( $message =~ /\[(woot|ouch)! now at (-?\d+)\]/ )
       )
     {
-        $message = "\"Over there\" the karma was raised to $1";
+        # This is an echo of a ++/-- that was done elsewhere
+        $message = "\"Over there\" the karma was changed to $2";
+    }
+    elsif( $message =~ /(.*)?\[(woot|ouch)! now at (-?\d+)\](.*)?/ ) {
+        # This is a ++/-- done on this channel
+        $message = "$1 $4";
+    }
+
+
+    if (!$who) {
+        $who = '...';
     }
 
     return ( $who, $message );
