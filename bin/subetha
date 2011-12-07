@@ -107,8 +107,40 @@ $irc_con->reg_cb(
         warn "IRC: Got \"$channel: $who: $text\"\n" if $DEBUG > 1;
         $text = parse_irc($text);
         if ($text) {
-            grapevine( $channel, $who, $text );
+            grapevine(
+                {
+                    channel => $channel,
+                    who     => $who,
+                    text    => $text,
+                    type    => 'message'
+                }
+            );
         }
+    },
+
+    # Emotes. Gotta catch'em all!
+    debug_recv => sub {
+        my ( $irc_con, $msg ) = @_;
+
+        my $who     = prefix_nick( $msg->{prefix} );
+        my $channel = $msg->{params}->[0];
+        my $text    = $msg->{params}->[1];
+
+        if ( !$text || ( $text !~ /ACTION\s+(.+)$/ ) ) {
+
+            # This is not an emote
+            return;
+        }
+        $text = $1;
+        chop $text;
+        grapevine(
+            {
+                channel => $channel,
+                who     => $who,
+                text    => $text,
+                type    => 'emote'
+            }
+        );
     },
 
     privatemsg => sub {
@@ -131,7 +163,7 @@ $irc_con->reg_cb(
             warn "IRC: Just joined $channel\n" if $DEBUG;
             $irc_con->send_chan( $channel, 'PRIVMSG', $channel, $connect_msg );
         }
-    }
+    },
 );
 
 $irc_con->connect( $config{irc_server}, $config{irc_port},
@@ -182,9 +214,18 @@ $xmpp_con->reg_cb(
         my $channel = $msg->from;
         $channel = prep_bare_jid($channel);
         warn "XMPP: Got \"$text\" on \"$channel\"\n" if $DEBUG > 1;
-        my ( $who, $message ) = parse_xmpp($text);
+        my ( $who, $message, $emote ) = parse_xmpp($text);
+        my $type = 'message';
+        $type = 'emote' if $emote;
         if ($message) {
-            grapevine( $channel, $who, $message );
+            grapevine(
+                {
+                    channel => $channel,
+                    who     => $who,
+                    text    => $message,
+                    type    => $type,
+                }
+            );
         }
     },
 
@@ -232,26 +273,50 @@ warn "I'm done, goodbye.\n";
 # The good stuff!
 
 sub grapevine {
-    my ( $channel, $who, $msg ) = @_;
+    my $p = shift;
 
-    warn "Grapevine: heard \"$msg\" from \"$who\" on \"$channel\"\n"
+    warn "Grapevine: heard \""
+      . $p->{text}
+      . "\" from \""
+      . $p->{who}
+      . "\" on \""
+      . $p->{channel} . "\"\n"
       if $DEBUG;
 
     for my $chan ( keys %{ $config{channels} } ) {
-        next if $channel eq $chan;
+        next if $p->{channel} eq $chan;
 
         if ( $config{channels}{$chan} eq 'irc' ) {
             warn "Resending on $chan\n" if $DEBUG > 1;
-            $irc_con->send_chan( $chan, 'PRIVMSG', $chan,
-                format_irc( $who, $msg ) );
+            $irc_con->send_chan(
+                $chan,
+                'PRIVMSG',
+                $chan,
+                format_irc(
+                    {
+                        from => $p->{who},
+                        text => $p->{text},
+                        type => $p->{type}
+                    }
+                )
+            );
         }
         elsif ( $config{channels}{$chan} eq 'xmpp' ) {
             warn "Resending on $chan\n" if $DEBUG > 1;
-            $xmpp_con->send_message( format_xmpp( $who, $msg ), $chan );
+            $xmpp_con->send_message(
+                format_xmpp(
+                    {
+                        from => $p->{who},
+                        text => $p->{text},
+                        type => $p->{type}
+                    }
+                ),
+                $chan
+            );
         }
         else {
-            warn
-"Message received from unknown channel! channel:\"$channel\"; who:\"$who\";msg:\"$msg\"\n";
+            warn "Message received from unknown channel! channel:\n";
+            warn Dumper($p);
         }
     }
 }
@@ -274,7 +339,7 @@ sub personal {
         && exists( $config{irc_password} )
       )
     {
-        my $identify_command = "identify ".$config{irc_password};
+        my $identify_command = "identify " . $config{irc_password};
         warn "IRC: Identifying myself to NickServ\n" if $DEBUG;
         $irc_con->send_srv( PRIVMSG => 'NickServ', $identify_command );
     }
@@ -283,27 +348,45 @@ sub personal {
 sub parse_xmpp {
     my ($incoming_text) = @_;
 
-    my ( $trash, $who, $message ) = $incoming_text =~ /(\[(.+?)\]\s+)?(.+)$/;
+    my $who;
+    my $message;
+    my $emote = 0;
 
-    if (   $who
-        && ( $who eq $config{irc_nick} )
-        && ( $message =~ /\[(woot|ouch)! now at (-?\d+)\]/ ) )
-    {
+    if ( $incoming_text =~ /^_(.+?)\s+(.+)_$/ ) {
 
-        # This is an echo of a ++/-- that was done elsewhere
-        $message = "\"Over there\" the karma was changed to $2";
+        # It's an emote, Jim
+        $who     = $1;
+        $message = $2;
+        $emote   = 1;
     }
-    elsif ( $message =~ /(.*)?\[(woot|ouch)! now at (-?\d+)\](.*)?/ ) {
+    else {
 
-        # This is a ++/-- done on this channel
-        $message = "$1 $4";
-    }
-
-    if ( !$who ) {
-        $who = '...';
+        # They appear to be trying to communicate, Captain...
+        my $trash;
+        ( $trash, $who, $message ) = $incoming_text =~ /(\[(.+?)\]\s+)?(.+)$/;
     }
 
-    return ( $who, $message );
+    if ( !$emote ) {
+        if (   $who
+            && ( $who eq $config{irc_nick} )
+            && ( $message =~ /\[(woot|ouch)! now at (-?\d+)\]/ ) )
+        {
+
+            # This is an echo of a ++/-- that was done elsewhere
+            $message = "Elsewhere karma was changed to $2";
+        }
+        elsif ( $message =~ /(.*)?\[(woot|ouch)! now at (-?\d+)\](.*)?/ ) {
+
+            # This is a ++/-- done on this channel
+            $message = "$1 $4";
+        }
+
+        if ( !$who ) {
+            $who = '...';
+        }
+    }
+
+    return ( $who, $message, $emote );
 }
 
 sub parse_irc {
@@ -312,21 +395,56 @@ sub parse_irc {
 }
 
 sub format_xmpp {
-    my ( $from, $msg ) = @_;
+    my $p = shift;
 
-    if ($from) {
-        $msg = "[$from] $msg";
+    my $msg;
+    if ( exists $p->{text} ) {
+        $msg = $p->{text};
     }
-    setUTF8($msg);
+    else {
+        return;
+    }
 
+    if (   exists( $p->{from} )
+        && exists( $p->{type} )
+        && ( $p->{type} eq 'message' ) )
+    {
+        $msg = "[" . $p->{from} . "] " . $p->{text};
+    }
+    elsif (exists( $p->{from} )
+        && exists( $p->{type} )
+        && ( $p->{type} eq 'emote' ) )
+    {
+        $msg = "_" . $p->{from} . " " . $p->{text} . "_";
+    }
+
+    setUTF8($msg);
     return $msg;
 }
 
 sub format_irc {
-    my ( $from, $msg ) = @_;
+    my $p = shift;
 
-    if ( $from && $msg ) {
-        $msg = "<$from> $msg";
+    my $msg;
+    if ( exists $p->{text} ) {
+        $msg = $p->{text};
     }
+    else {
+        return;
+    }
+
+    if (   exists( $p->{from} )
+        && exists( $p->{type} )
+        && ( $p->{type} eq 'message' ) )
+    {
+        $msg = "<" . $p->{from} . "> " . $p->{text};
+    }
+    elsif (exists( $p->{from} )
+        && exists( $p->{type} )
+        && ( $p->{type} eq 'emote' ) )
+    {
+        $msg = "* *" . $p->{from} . "* " . $p->{text};
+    }
+
     return $msg;
 }
