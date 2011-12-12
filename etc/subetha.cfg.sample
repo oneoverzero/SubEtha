@@ -6,7 +6,15 @@
     "xmpp_jid":"jid@change.me",
     "xmpp_password":"secretchangeme",
     "channels":{
-        "#testchangeme":"irc",
-        "chat@ippartych.at":"xmpp"
+        "chat@im.partych.at":{
+            "type":"broken_xmpp",
+            "http_gateway":"http://partychat-hooks.appspot.com/post/my_id"
+        },
+        "#heartofgold":{
+            "type":"irc"
+        },
+        "goodchat@server.domain.com":{
+            "type":"xmpp",
+        }
     }
 }

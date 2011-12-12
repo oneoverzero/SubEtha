@@ -13,7 +13,9 @@ use AnyEvent;
 use AnyEvent::IRC::Client;
 use AnyEvent::IRC::Util qw/prefix_nick/;
 use AnyEvent::XMPP::Client;
-use AnyEvent::XMPP::Util qw/prep_bare_jid/;
+use AnyEvent::XMPP::Util qw/prep_bare_jid split_jid/;
+use AnyEvent::HTTP;
+use URL::Encode qw/url_encode_utf8/;
 use JSON;
 use String::SetUTF8;
 
@@ -25,7 +27,7 @@ my $VERSION = 0.2;
 # Configuration
 
 my $DEBUG = $ENV{DEBUG} || 1;
-my $config_file = '../etc/subetha.cfg';
+my $config_file = $ARGV[0] || '../etc/subetha.cfg';
 
 my $connect_msg =
   "Hi, my name is SubEtha and I'll be your friendly lobster proxy";
@@ -39,8 +41,9 @@ my %config = (
     irc_nick     => 'ultrabot',
     irc_password => 'verys3crit',
 
-    xmpp_jid      => 'mybot@jabber.org',
-    xmpp_password => 'verys3cret',
+    xmpp_jid          => 'mybot@jabber.org',
+    xmpp_password     => 'verys3cret',
+    xmpp_http_gateway => 'http://partychat-hooks.appspot.com/post/your_id',
 
     channels => { 'chat@im.partych.at' => 'xmpp', '#testchan' => 'irc' },
 );
@@ -52,7 +55,7 @@ if ($cfg) {
 
 if ($DEBUG) {
     warn
-"Starting up with DEBUG=$DEBUG, version $VERSION, and the following config:\n";
+"$0: Starting up with DEBUG=$DEBUG, version $VERSION, and the following config:\n";
     warn Dumper( \%config );
 }
 
@@ -60,7 +63,7 @@ sub read_json_conf {
     my $filename = shift;
     my $fh;
     if ( !open( $fh, '<', $filename ) ) {
-        warn "Error opening the config file \"$filename\": $!\n";
+        warn "$0: Error opening the config file \"$filename\": $!\n";
         return;
     }
     my $json_conf = do { local $/; <$fh> };
@@ -170,7 +173,7 @@ $irc_con->connect( $config{irc_server}, $config{irc_port},
     { nick => $config{irc_nick} } );
 
 for my $channel ( keys %{ $config{channels} } ) {
-    next unless ( $config{channels}{$channel} eq 'irc' );
+    next unless ( $config{channels}{$channel}{type} eq 'irc' );
     warn "IRC: Trying to connect to channel $channel\n" if $DEBUG;
     $irc_con->send_srv( 'JOIN', $channel );
 }
@@ -195,9 +198,9 @@ $xmpp_con->reg_cb(
 
         warn "XMPP: Session is ready, let's rock n' roll\n" if $DEBUG;
         for my $channel ( keys %{ $config{channels} } ) {
-            next unless ( $config{channels}{$channel} eq 'xmpp' );
+            next unless ( $config{channels}{$channel}{type} =~ /xmpp/ );
             warn "XMPP: Greeting people on $channel\n" if $DEBUG;
-            $connection->send_message( $connect_msg, $channel );
+            xmpp_send_message( $connection, $connect_msg, $channel );
         }
     },
 
@@ -214,7 +217,17 @@ $xmpp_con->reg_cb(
         my $channel = $msg->from;
         $channel = prep_bare_jid($channel);
         warn "XMPP: Got \"$text\" on \"$channel\"\n" if $DEBUG > 1;
-        my ( $who, $message, $emote ) = parse_xmpp($text);
+        my ( $who,  $message, $emote ) = parse_xmpp($text);
+        my ( $user, $host,    $res )   = split_jid( $config{xmpp_jid} );
+        if (   ( $config{channels}{$channel}{type} eq 'broken_xmpp' )
+            && ( $text =~ /^\[$user/ ) )
+        {
+
+            # We got an echo from ourselves, ignore
+            warn "XMPP: Ignoring message, it is an echo of ourselves\n"
+              if $DEBUG > 1;
+            return;
+        }
         my $type = 'message';
         $type = 'emote' if $emote;
         if ($message) {
@@ -262,12 +275,12 @@ $xmpp_con->start();
 # Report stuff and go into the event loop
 
 AnyEvent::post_detect {
-    warn "My event model is \"$AnyEvent::MODEL\"\n" if $DEBUG;
+    warn "$0: My event model is \"$AnyEvent::MODEL\"\n" if $DEBUG;
 };
 
 $c->wait;
 $irc_con->disconnect;
-warn "I'm done, goodbye.\n";
+warn "$0: I'm done, goodbye.\n";
 
 ########################################
 # The good stuff!
@@ -275,7 +288,7 @@ warn "I'm done, goodbye.\n";
 sub grapevine {
     my $p = shift;
 
-    warn "Grapevine: heard \""
+    warn "$0: Grapevine: heard \""
       . $p->{text}
       . "\" from \""
       . $p->{who}
@@ -286,8 +299,8 @@ sub grapevine {
     for my $chan ( keys %{ $config{channels} } ) {
         next if $p->{channel} eq $chan;
 
-        if ( $config{channels}{$chan} eq 'irc' ) {
-            warn "Resending on $chan\n" if $DEBUG > 1;
+        if ( $config{channels}{$chan}{type} eq 'irc' ) {
+            warn "$0: Resending on $chan\n" if $DEBUG > 1;
             $irc_con->send_chan(
                 $chan,
                 'PRIVMSG',
@@ -301,8 +314,8 @@ sub grapevine {
                 )
             );
         }
-        elsif ( $config{channels}{$chan} eq 'xmpp' ) {
-            warn "Resending on $chan\n" if $DEBUG > 1;
+        elsif ( $config{channels}{$chan}{type} eq 'xmpp' ) {
+            warn "$0: Resending on $chan\n" if $DEBUG > 1;
             $xmpp_con->send_message(
                 format_xmpp(
                     {
@@ -314,8 +327,22 @@ sub grapevine {
                 $chan
             );
         }
+        elsif ( $config{channels}{$chan}{type} eq 'broken_xmpp' ) {
+            warn "$0: Resending on $chan\n" if $DEBUG > 1;
+            xmpp_send_message(
+                $xmpp_con,
+                format_xmpp(
+                    {
+                        from => $p->{who},
+                        text => $p->{text},
+                        type => $p->{type}
+                    }
+                ),
+                $chan
+            );
+        }
         else {
-            warn "Message received from unknown channel! channel:\n";
+            warn "$0: Could not deliver message:\n";
             warn Dumper($p);
         }
     }
@@ -324,7 +351,7 @@ sub grapevine {
 sub personal {
     my ( $who, $msg ) = @_;
 
-    warn "Personal message: \"$msg\" from \"$who\"\n" if $DEBUG;
+    warn "$0: Personal message: \"$msg\" from \"$who\"\n" if $DEBUG;
     if ( $who eq 'nfn' ) {    #TODO: Eeeeeeeek!
         if ( $msg eq 'shutdown' ) {
             $c->broadcast("Nuno told me to go!");
@@ -447,4 +474,29 @@ sub format_irc {
     }
 
     return $msg;
+}
+
+sub xmpp_send_message {
+    my ( $connection, $message, $channel ) = @_;
+
+    if ( $config{channels}{$channel}{type} eq 'xmpp' ) {
+        $connection->send_message( $message, $channel );
+    }
+    elsif ( $config{channels}{$channel}{type} eq 'broken_xmpp' ) {
+        my $url =
+          $config{channels}{$channel}{http_gateway} . "?msg="
+          . url_encode_utf8($message);
+        warn "XMPP: About to invoque: $url\n" if $DEBUG > 1;
+        http_get $url, sub {
+            my ( $body, $hdr ) = @_;
+
+            if ( $hdr->{Status} =~ /^2/ ) {
+                warn "XMPP: Sent via HTTP successfully\n" if $DEBUG > 1;
+            }
+            else {
+                warn
+"XMPP: Error sending message: $hdr->{Status} - $hdr->{Reason}\n";
+            }
+          }
+    }
 }
