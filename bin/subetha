@@ -455,6 +455,12 @@ sub format_irc {
     my $msg;
     if ( exists $p->{text} ) {
         $msg = $p->{text};
+        my $testmsg = $msg;
+        my $success = utf8::downgrade($testmsg, 1);
+        if (!$success) {
+            warn "Failed to convert string \"".$p->{text}."\"";
+            return;
+        }
     }
     else {
         return;
