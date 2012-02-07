@@ -486,7 +486,7 @@ sub xmpp_send_message {
     my ( $connection, $message, $channel ) = @_;
 
     if ( $config{channels}{$channel}{type} eq 'xmpp' ) {
-        $connection->send_message( $message, $channel );
+        $connection->send_message( $message, $channel, undef, 'chat' );
     }
     elsif ( $config{channels}{$channel}{type} eq 'broken_xmpp' ) {
         my $url =
