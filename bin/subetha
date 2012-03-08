@@ -26,8 +26,8 @@ my $VERSION = 0.2;
 ########################################
 # Configuration
 
-my $DEBUG = $ENV{DEBUG} || 1;
-my $config_file = $ARGV[0] || '../etc/subetha.cfg';
+my $DEBUG       = $ENV{DEBUG} || 1;
+my $config_file = $ARGV[0]    || '../etc/subetha.cfg';
 
 my $connect_msg =
   "Hi, my name is SubEtha and I'll be your friendly lobster proxy";
@@ -74,202 +74,15 @@ sub read_json_conf {
 #
 ########################################
 
-my $c = AnyEvent->condvar;
+my $main_loop = AnyEvent->condvar;
 
-########################################
-# Setup IRC connecttion and stuff
+my $irc_con;
+setup_irc();
 
-my $irc_con = new AnyEvent::IRC::Client;
-
-$irc_con->reg_cb(
-    connect => sub {
-        my ( $irc_con, $err ) = @_;
-
-        if ( defined $err ) {
-            warn "IRC: connect error: $err\n";
-            $c->broadcast("IRC connection borked");
-        }
-        else {
-            warn "IRC: connected.\n" if $DEBUG;
-        }
-    },
-
-    disconnect => sub {
-        my ( $irc_con, $reason ) = @_;
-
-        $reason = "no reason given" unless $reason;
-        warn "IRC: disconnected: $reason\n";
-        $c->broadcast("IRC got disconnected");
-    },
-
-    publicmsg => sub {
-        my ( $irc_con, $channel, $ircmsg ) = @_;
-
-        my $who  = prefix_nick( $ircmsg->{prefix} );
-        my $text = $ircmsg->{params}->[1];
-        warn "IRC: Got \"$channel: $who: $text\"\n" if $DEBUG > 1;
-        $text = parse_irc($text);
-        if ($text) {
-            grapevine(
-                {
-                    channel => $channel,
-                    who     => $who,
-                    text    => $text,
-                    type    => 'message'
-                }
-            );
-        }
-    },
-
-    # Emotes. Gotta catch'em all!
-    debug_recv => sub {
-        my ( $irc_con, $msg ) = @_;
-
-        my $who     = prefix_nick( $msg->{prefix} );
-        my $channel = $msg->{params}->[0];
-        my $text    = $msg->{params}->[1];
-
-        if ( !$text || ( $text !~ /ACTION\s+(.+)$/ ) ) {
-
-            # This is not an emote
-            return;
-        }
-        $text = $1;
-        chop $text;
-        grapevine(
-            {
-                channel => $channel,
-                who     => $who,
-                text    => $text,
-                type    => 'emote'
-            }
-        );
-    },
-
-    privatemsg => sub {
-        my ( $irc_con, $nick, $ircmsg ) = @_;
-
-        #warn Dumper $ircmsg;
-        my $who  = prefix_nick( $ircmsg->{prefix} );
-        my $text = $ircmsg->{params}->[1];
-        warn "IRC: \"$who\" told me \"$text\" in private (to \"$nick\")\n"
-          if $DEBUG > 1;
-        personal( $who, $text );
-    },
-
-    registered => sub { warn "IRC: registered on network\n" if $DEBUG; },
-
-    join => sub {
-        my ( $irc_con, $nick, $channel, $is_myself ) = @_;
-
-        if ($is_myself) {
-            warn "IRC: Just joined $channel\n" if $DEBUG;
-            $irc_con->send_chan( $channel, 'PRIVMSG', $channel, $connect_msg );
-        }
-    },
-);
-
-$irc_con->connect( $config{irc_server}, $config{irc_port},
-    { nick => $config{irc_nick} } );
-
-for my $channel ( keys %{ $config{channels} } ) {
-    next unless ( $config{channels}{$channel}{type} eq 'irc' );
-    warn "IRC: Trying to connect to channel $channel\n" if $DEBUG;
-    $irc_con->send_srv( 'JOIN', $channel );
-}
-
-########################################
-# Setup XMPP connecttion and stuff
-
+my $xmpp_con;
 my $xmpp_debug = 0;
 if ( $DEBUG > 2 ) { $xmpp_debug = 1 }
-my $xmpp_con = new AnyEvent::XMPP::Client( debug => $xmpp_debug );
-
-$xmpp_con->reg_cb(
-    connected => sub {
-        my ( $connection, $account ) = @_;
-
-        warn "XMPP: connected with account " . $account->jid . "\n"
-          if $DEBUG;
-    },
-
-    session_ready => sub {
-        my ($connection) = @_;
-
-        warn "XMPP: Session is ready, let's rock n' roll\n" if $DEBUG;
-        for my $channel ( keys %{ $config{channels} } ) {
-            next unless ( $config{channels}{$channel}{type} =~ /xmpp/ );
-            warn "XMPP: Greeting people on $channel\n" if $DEBUG;
-            xmpp_send_message( $connection, $connect_msg, $channel );
-        }
-    },
-
-    added_account => sub {
-        my ( $connection, $account ) = @_;
-
-        warn "XMPP: Account added: " . $account->jid . "\n" if $DEBUG;
-    },
-
-    message => sub {
-        my ( $connection, $account, $msg ) = @_;
-
-        my $text    = $msg->body;
-        my $channel = $msg->from;
-        $channel = prep_bare_jid($channel);
-        warn "XMPP: Got \"$text\" on \"$channel\"\n" if $DEBUG > 1;
-        my ( $who,  $message, $emote ) = parse_xmpp($text);
-        my ( $user, $host,    $res )   = split_jid( $config{xmpp_jid} );
-        if (   ( $config{channels}{$channel}{type} eq 'broken_xmpp' )
-            && ( $text =~ /^\[$user/ ) )
-        {
-
-            # We got an echo from ourselves, ignore
-            warn "XMPP: Ignoring message, it is an echo of ourselves\n"
-              if $DEBUG > 1;
-            return;
-        }
-        my $type = 'message';
-        $type = 'emote' if $emote;
-        if ($message) {
-            grapevine(
-                {
-                    channel => $channel,
-                    who     => $who,
-                    text    => $message,
-                    type    => $type,
-                }
-            );
-        }
-    },
-
-    connect_error => sub {
-        my ( $connection, $account, $reason ) = @_;
-
-        warn "XMPP: connection error! JID: "
-          . $account->jid
-          . ", reason: \"$reason\"\n";
-        $c->broadcast("XMPP connection borked");
-    },
-
-    error => sub {
-        my ( $connection, $account, $error ) = @_;
-
-        warn "XMPP: Error with account "
-          . $account->jid . ": \""
-          . $error->string . "\"\n";
-
-        # TODO: Probably should try disconnecting and reconnecting here...
-    }
-);
-
-if ( $config{xmpp_server} ) {
-    $xmpp_con->add_account( $config{xmpp_jid}, $config{xmpp_password},
-        $config{xmpp_server} );
-}
-else {
-    $xmpp_con->add_account( $config{xmpp_jid}, $config{xmpp_password} );
-}
-$xmpp_con->start();
+setup_xmpp();
 
 ########################################
 # Report stuff and go into the event loop
@@ -278,8 +91,9 @@ AnyEvent::post_detect {
     warn "$0: My event model is \"$AnyEvent::MODEL\"\n" if $DEBUG;
 };
 
-$c->wait;
+$main_loop->recv;
 $irc_con->disconnect;
+$xmpp_con->disconnect;
 warn "$0: I'm done, goodbye.\n";
 
 ########################################
@@ -316,7 +130,8 @@ sub grapevine {
         }
         elsif ( $config{channels}{$chan}{type} eq 'xmpp' ) {
             warn "$0: Resending on $chan\n" if $DEBUG > 1;
-            $xmpp_con->send_message(
+            xmpp_send_message(
+                $xmpp_con,
                 format_xmpp(
                     {
                         from => $p->{who},
@@ -354,7 +169,16 @@ sub personal {
     warn "$0: Personal message: \"$msg\" from \"$who\"\n" if $DEBUG;
     if ( $who eq 'nfn' ) {    #TODO: Eeeeeeeek!
         if ( $msg eq 'shutdown' ) {
-            $c->broadcast("Nuno told me to go!");
+            warn "$0: Shutting down by user command\n";
+            $main_loop->send("Nuno told me to go!");
+        }
+        elsif ( $msg eq 'restart xmpp' ) {
+            warn "$0: Restarting XMPP\n";
+            $xmpp_con->disconnect;
+        }
+        elsif ( $msg eq 'restart irc' ) {
+            warn "$0: Restarting IRC\n";
+            $irc_con->disconnect;
         }
     }
 
@@ -456,9 +280,9 @@ sub format_irc {
     if ( exists $p->{text} ) {
         $msg = $p->{text};
         my $testmsg = $msg;
-        my $success = utf8::downgrade($testmsg, 1);
-        if (!$success) {
-            warn "Failed to convert string \"".$p->{text}."\"";
+        my $success = utf8::downgrade( $testmsg, 1 );
+        if ( !$success ) {
+            warn "Failed to convert string \"" . $p->{text} . "\"";
             return;
         }
     }
@@ -505,4 +329,195 @@ sub xmpp_send_message {
             }
           }
     }
+}
+
+sub setup_irc {
+    $irc_con = new AnyEvent::IRC::Client;
+
+    $irc_con->reg_cb(
+        connect => sub {
+            my ( $irc_con, $err ) = @_;
+
+            if ( defined $err ) {
+                warn "IRC: connect error: $err\n";
+                setup_irc();
+            }
+            else {
+                warn "IRC: connected.\n" if $DEBUG;
+            }
+        },
+
+        disconnect => sub {
+            my ( $irc_con, $reason ) = @_;
+
+            $reason = "no reason given" unless $reason;
+            warn "IRC: disconnected: $reason\n";
+            setup_irc();
+        },
+
+        publicmsg => sub {
+            my ( $irc_con, $channel, $ircmsg ) = @_;
+
+            my $who  = prefix_nick( $ircmsg->{prefix} );
+            my $text = $ircmsg->{params}->[1];
+            warn "IRC: Got \"$channel: $who: $text\"\n" if $DEBUG > 1;
+            $text = parse_irc($text);
+            if ($text) {
+                grapevine(
+                    {
+                        channel => $channel,
+                        who     => $who,
+                        text    => $text,
+                        type    => 'message'
+                    }
+                );
+            }
+        },
+
+        # Emotes. Gotta catch'em all!
+        debug_recv => sub {
+            my ( $irc_con, $msg ) = @_;
+
+            my $who     = prefix_nick( $msg->{prefix} );
+            my $channel = $msg->{params}->[0];
+            my $text    = $msg->{params}->[1];
+
+            if ( !$text || ( $text !~ /ACTION\s+(.+)$/ ) ) {
+
+                # This is not an emote
+                return;
+            }
+            $text = $1;
+            chop $text;
+            grapevine(
+                {
+                    channel => $channel,
+                    who     => $who,
+                    text    => $text,
+                    type    => 'emote'
+                }
+            );
+        },
+
+        privatemsg => sub {
+            my ( $irc_con, $nick, $ircmsg ) = @_;
+
+            #warn Dumper $ircmsg;
+            my $who  = prefix_nick( $ircmsg->{prefix} );
+            my $text = $ircmsg->{params}->[1];
+            warn "IRC: \"$who\" told me \"$text\" in private (to \"$nick\")\n"
+              if $DEBUG > 1;
+            personal( $who, $text );
+        },
+
+        registered => sub { warn "IRC: registered on network\n" if $DEBUG; },
+
+        join => sub {
+            my ( $irc_con, $nick, $channel, $is_myself ) = @_;
+
+            if ($is_myself) {
+                warn "IRC: Just joined $channel\n" if $DEBUG;
+                $irc_con->send_chan( $channel, 'PRIVMSG', $channel,
+                    $connect_msg );
+            }
+        },
+    );
+
+    $irc_con->connect( $config{irc_server}, $config{irc_port},
+        { nick => $config{irc_nick} } );
+
+    for my $channel ( keys %{ $config{channels} } ) {
+        next unless ( $config{channels}{$channel}{type} eq 'irc' );
+        warn "IRC: Trying to connect to channel $channel\n" if $DEBUG;
+        $irc_con->send_srv( 'JOIN', $channel );
+    }
+}
+
+sub setup_xmpp {
+    $xmpp_con = new AnyEvent::XMPP::Client( debug => $xmpp_debug );
+
+    $xmpp_con->reg_cb(
+        connected => sub {
+            my ( $connection, $account ) = @_;
+
+            warn "XMPP: connected with account " . $account->jid . "\n"
+              if $DEBUG;
+        },
+
+        session_ready => sub {
+            my ($connection) = @_;
+
+            warn "XMPP: Session is ready, let's rock n' roll\n" if $DEBUG;
+            for my $channel ( keys %{ $config{channels} } ) {
+                next unless ( $config{channels}{$channel}{type} =~ /xmpp/ );
+                warn "XMPP: Greeting people on $channel\n" if $DEBUG;
+                xmpp_send_message( $connection, $connect_msg, $channel );
+            }
+        },
+
+        added_account => sub {
+            my ( $connection, $account ) = @_;
+
+            warn "XMPP: Account added: " . $account->jid . "\n" if $DEBUG;
+        },
+
+        message => sub {
+            my ( $connection, $account, $msg ) = @_;
+
+            my $text    = $msg->body;
+            my $channel = $msg->from;
+            $channel = prep_bare_jid($channel);
+            warn "XMPP: Got \"$text\" on \"$channel\"\n" if $DEBUG > 1;
+            my ( $who,  $message, $emote ) = parse_xmpp($text);
+            my ( $user, $host,    $res )   = split_jid( $config{xmpp_jid} );
+            if (   ( $config{channels}{$channel}{type} eq 'broken_xmpp' )
+                && ( $text =~ /^\[$user/ ) )
+            {
+
+                # We got an echo from ourselves, ignore
+                warn "XMPP: Ignoring message, it is an echo of ourselves\n"
+                  if $DEBUG > 1;
+                return;
+            }
+            my $type = 'message';
+            $type = 'emote' if $emote;
+            if ($message) {
+                grapevine(
+                    {
+                        channel => $channel,
+                        who     => $who,
+                        text    => $message,
+                        type    => $type,
+                    }
+                );
+            }
+        },
+
+        connect_error => sub {
+            my ( $connection, $account, $reason ) = @_;
+
+            warn "XMPP: connection error! JID: "
+              . $account->jid
+              . ", reason: \"$reason\"\n";
+            setup_xmpp();
+        },
+
+        error => sub {
+            my ( $connection, $account, $error ) = @_;
+
+            warn "XMPP: Error with account "
+              . $account->jid . ": \""
+              . $error->string . "\"\n";
+            setup_xmpp();
+        }
+    );
+
+    if ( $config{xmpp_server} ) {
+        $xmpp_con->add_account( $config{xmpp_jid}, $config{xmpp_password},
+            $config{xmpp_server} );
+    }
+    else {
+        $xmpp_con->add_account( $config{xmpp_jid}, $config{xmpp_password} );
+    }
+    $xmpp_con->start();
 }
