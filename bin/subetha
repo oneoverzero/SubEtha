@@ -21,7 +21,7 @@ use String::SetUTF8;
 
 use Data::Dumper;
 
-my $VERSION = 0.2;
+my $VERSION = 0.3;
 
 ########################################
 # Configuration
@@ -45,7 +45,7 @@ my %config = (
     xmpp_password     => 'verys3cret',
     xmpp_http_gateway => 'http://partychat-hooks.appspot.com/post/your_id',
 
-    channels => { 'chat@im.partych.at' => 'xmpp', '#testchan' => 'irc' },
+    channels => { 'chat@at.partych.at' => 'xmpp', '#testchan' => 'irc' },
 );
 
 my $cfg = read_json_conf($config_file);
@@ -199,6 +199,8 @@ sub personal {
 
 sub parse_xmpp {
     my ($incoming_text) = @_;
+
+    warn "Incoming message from the Big Giant XMPP Head : $incoming_text\n" if $DEBUG > 2;
 
     my $who;
     my $message;
@@ -434,6 +436,13 @@ sub setup_irc {
     }
 }
 
+sub debug_callback
+{
+  my ( $connection, $account, $data ) = @_;
+  warn "XMPP: Got this, " . Dumper( $data ) if $DEBUG > 2;
+}
+
+
 sub setup_xmpp {
     $xmpp_con = new AnyEvent::XMPP::Client( debug => $xmpp_debug );
 
@@ -462,8 +471,17 @@ sub setup_xmpp {
             warn "XMPP: Account added: " . $account->jid . "\n" if $DEBUG;
         },
 
+        message_xml => \&debug_callback,
+        error => \&debug_callback,
+        stream_error => \&debug_callback,
+        xml_parser_error => \&debug_callback,
+        iq_auth_error => \&debug_callback,
+        bind_error => \&debug_callback,
+
         message => sub {
             my ( $connection, $account, $msg ) = @_;
+            warn "XMPP: MESSAGE! We're here!\n"
+              if $DEBUG > 2;
 
             my $text    = $msg->body;
             my $channel = $msg->from;
@@ -509,7 +527,10 @@ sub setup_xmpp {
             warn "XMPP: Error with account "
               . $account->jid . ": \""
               . $error->string . "\"\n";
-            setup_xmpp();
+            #TODO: analize the error message and see if it is a really bad one.
+            # we were restarting the connection when someone on the roster had
+            # had it's server go away. BAD!
+            #setup_xmpp();
         }
     );
 
